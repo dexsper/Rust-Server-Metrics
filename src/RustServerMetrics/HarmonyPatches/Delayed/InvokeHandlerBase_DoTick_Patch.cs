@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using RustServerMetrics.HarmonyPatches.Utility;
 using System;
 using System.Collections.Generic;
@@ -20,16 +20,8 @@ namespace RustServerMetrics.HarmonyPatches.Delayed
         {
             new CodeInstruction(OpCodes.Ldloc_S),
             new CodeInstruction(OpCodes.Ldfld, AccessTools.Field(typeof(InvokeAction), nameof(InvokeAction.action))),
-            new CodeInstruction(OpCodes.Callvirt, AccessTools.Method(typeof(Action), nameof(Action.Invoke))),
-            new CodeInstruction(OpCodes.Br_S)
+            new CodeInstruction(OpCodes.Callvirt, AccessTools.Method(typeof(Action), nameof(Action.Invoke)))
         };
-
-        readonly static CodeInstruction[] _jmpSequenceToFind = new CodeInstruction[]
-{
-            new CodeInstruction(OpCodes.Ldloc_S),
-            new CodeInstruction(OpCodes.Ldc_I4_1),
-            new CodeInstruction(OpCodes.Add)
-};
 
         [HarmonyPrepare]
         public static bool Prepare()
@@ -52,30 +44,65 @@ namespace RustServerMetrics.HarmonyPatches.Delayed
         [HarmonyTranspiler]
         public static IEnumerable<CodeInstruction> Transpile(IEnumerable<CodeInstruction> originalInstructions, MethodBase methodBase)
         {
-            LocalVariableInfo variableInfo = methodBase.GetMethodBody().LocalVariables.FirstOrDefault(x => x.LocalType == typeof(InvokeAction));
-            _replacementSequenceToFind[0].operand = variableInfo;
-            _jmpSequenceToFind[0].operand = variableInfo;
-
-            var instructionsList = new List<CodeInstruction>(originalInstructions);
-
-            var jmpIdx = GetSequenceStartIndex(instructionsList, _jmpSequenceToFind);
-            if (jmpIdx < 0) throw new Exception($"Failed to find jmp injection index for {nameof(InvokeHandlerBase_DoTick_Patch)}");
-
-            _replacementSequenceToFind[3].operand = instructionsList[jmpIdx];
-
-            var methodToCallInfo = typeof(InvokeHandlerBase_DoTick_Patch)
-                .GetMethod(nameof(InvokeWrapper), BindingFlags.Static | BindingFlags.NonPublic);
-
-            var replacementIdx = GetSequenceStartIndex(instructionsList, _replacementSequenceToFind);
-            if (replacementIdx < 0) throw new Exception($"Failed to find replacement injection index for {nameof(InvokeHandlerBase_DoTick_Patch)}");
-
-            instructionsList.RemoveRange(replacementIdx + 1, _replacementSequenceToFind.Length - 2);
-            instructionsList.InsertRange(replacementIdx + 1, new CodeInstruction[]
+            try
             {
-                new CodeInstruction(OpCodes.Call, methodToCallInfo)
-            });
+                LocalVariableInfo variableInfo = methodBase.GetMethodBody().LocalVariables.FirstOrDefault(x => x.LocalType == typeof(InvokeAction));
+                if (variableInfo == null)
+                {
+                    Debug.LogError($"[ServerMetrics]: Failed to find InvokeAction local variable in {nameof(InvokeHandlerBase_DoTick_Patch)}");
+                    return originalInstructions;
+                }
+                
+                _replacementSequenceToFind[0].operand = variableInfo;
 
-            return instructionsList;
+                var instructionsList = new List<CodeInstruction>(originalInstructions);
+                var methodToCallInfo = typeof(InvokeHandlerBase_DoTick_Patch)
+                    .GetMethod(nameof(InvokeWrapper), BindingFlags.Static | BindingFlags.NonPublic);
+
+                int replacementsCount = 0;
+                while (true)
+                {
+                    var replacementIdx = GetSequenceStartIndex(instructionsList, _replacementSequenceToFind, false);
+                    if (replacementIdx < 0)
+                        break;
+                    
+                    // Replace sequence:
+                    // [idx + 0] ldloc.s invokeAction
+                    // [idx + 1] ldfld action  
+                    // [idx + 2] callvirt Invoke
+                    // With:
+                    // [idx + 0] ldloc.s invokeAction
+                    // [idx + 1] call InvokeWrapper
+                    
+                    var newInstruction = new CodeInstruction(OpCodes.Call, methodToCallInfo);
+                    // Copy labels from the instruction we're replacing
+                    newInstruction.labels.AddRange(instructionsList[replacementIdx + 1].labels);
+                    
+                    instructionsList[replacementIdx + 1] = newInstruction;
+                    instructionsList.RemoveAt(replacementIdx + 2); // Remove callvirt
+                    
+                    replacementsCount++;
+                }
+
+                if (replacementsCount == 0)
+                {
+                    Debug.LogWarning($"[ServerMetrics]: Failed to find any replacement sequences for {nameof(InvokeHandlerBase_DoTick_Patch)} - skipping patch (game code may have changed)");
+                    Debug.LogWarning($"[ServerMetrics]: Total instructions in method: {instructionsList.Count}");
+                }
+                else
+                {
+                    Debug.Log($"[ServerMetrics]: Successfully patched {replacementsCount} invokeAction.action() call(s) in {nameof(InvokeHandlerBase_DoTick_Patch)}");
+                    Debug.Log($"[ServerMetrics]: Transpiled DoTick method now has {instructionsList.Count} instructions");
+                }
+
+                return instructionsList;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[ServerMetrics]: Exception in {nameof(InvokeHandlerBase_DoTick_Patch)}: {ex.Message}");
+                Debug.LogError($"Stack trace: {ex.StackTrace}");
+                return originalInstructions;
+            }
         }
 
         static void InvokeWrapper(InvokeAction invokeAction)

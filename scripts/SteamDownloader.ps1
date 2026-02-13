@@ -18,8 +18,7 @@ if ($ps_version -le 5) {
     exit 1
 }
 
-# Format project name and set depot ID if provided
-if ($steam_depot) { $steam_depot = "-depot $steam_depot" }
+# Depot ID will be added as parameter in Get-Dependencies if provided
 
 # Set directory/file variables and create directories
 $root_dir = $PSScriptRoot
@@ -40,14 +39,14 @@ if (!(Test-Path $tools_dir)) {
 }
 
 # Set URLs of dependencies and tools to download
-# $steam_depotdl_url = "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_2.4.7/depotdownloader-2.4.7.zip"
-$steam_depotdl_url = "https://cdn.vgn.gg/vitalrustcom-static/DepotDownloader.zip"
+# Official DepotDownloader from SteamRE GitHub repository
+$steam_depotdl_url = "https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-windows-x64.zip"
 
 function Get-Downloader {
     # Check if DepotDownloader is already downloaded
-    $steam_depotdl_dll = Join-Path $tools_dir "DepotDownloader.dll"
+    $steam_depotdl_exe = Join-Path $tools_dir "DepotDownloader.exe"
     $steam_depotdl_zip = Join-Path $tools_dir "DepotDownloader.zip"
-    if (!(Test-Path $steam_depotdl_dll) -or (Get-Item $steam_depotdl_dll).LastWriteTime -lt (Get-Date).AddDays(-7)) {
+    if (!(Test-Path $steam_depotdl_exe) -or (Get-Item $steam_depotdl_exe).LastWriteTime -lt (Get-Date).AddDays(-7)) {
         # Download and extract DepotDownloader
         Write-Host "Downloading latest version of DepotDownloader"
         try {
@@ -63,11 +62,15 @@ function Get-Downloader {
         # TODO: Compare size and hash of .zip vs. what GitHub has via API
         Write-Host "Extracting DepotDownloader release files"
         Expand-Archive $steam_depotdl_zip -DestinationPath $tools_dir -Force
-        (Get-Item $steam_depotdl_dll).LastWriteTime = (Get-Date)
+        
+        if (Test-Path $steam_depotdl_exe) {
+            (Get-Item $steam_depotdl_exe).LastWriteTime = (Get-Date)
+        }
 
-        if (!(Test-Path $steam_depotdl_zip)) {
-            Get-Downloader # TODO: Add infinite loop prevention
-            return
+        if (!(Test-Path $steam_depotdl_exe)) {
+            Write-Host "Error: DepotDownloader.exe not found after extraction"
+            if ($LastExitCode -ne 0) { $host.SetShouldExit($LastExitCode) }
+            exit 1
         }
 
         # Cleanup downloaded .zip file
@@ -87,10 +90,21 @@ function Get-Dependencies {
     Set-Content -Path $fileListPath -Value "regex:RustDedicated_Data/Managed/.+\.dll"
 
     # Attempt to run DepotDownloader to get game DLLs
+    $steam_depotdl_exe = Join-Path $tools_dir "DepotDownloader.exe"
     try {
-        $depoArgsList = "`"$steam_depotdl_dll`" $steam_access -app $steam_appid -branch $steam_branch $steam_depot -os $platform -dir `"$platform_dir`" -filelist `"$fileListPath`""
-        Write-Host $depoArgsList
-        Start-Process dotnet -WorkingDirectory "$tools_dir" -ArgumentList $depoArgsList -NoNewWindow -Wait
+        # Build arguments list (anonymous access doesn't need -username parameter)
+        $depoArgs = @("-app", $steam_appid, "-branch", $steam_branch)
+        
+        # Add depot if specified
+        if ($steam_depot -and $steam_depot -ne "") {
+            $depoArgs += @("-depot", $steam_depot)
+        }
+        
+        # Add platform, directory and filelist
+        $depoArgs += @("-os", $platform, "-dir", $platform_dir, "-filelist", $fileListPath)
+        
+        Write-Host "Running: DepotDownloader.exe $($depoArgs -join ' ')"
+        Start-Process "$steam_depotdl_exe" -WorkingDirectory "$tools_dir" -ArgumentList $depoArgs -NoNewWindow -Wait
     }
     catch {
         Write-Host "Error: Could not start or complete getting dependencies"
